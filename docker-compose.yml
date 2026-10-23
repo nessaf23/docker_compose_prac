@@ -146,3 +146,27 @@ services:
         condition: service_healthy
       order-service:
         condition: service_healthy
+    # Записываем конфигурацию nginx.conf на лету прямо при старте контейнера, убирая внешнюю зависимость
+    command: >
+      sh -c "cat << 'EOF' > /etc/nginx/nginx.conf
+      events { worker_connections 1024; }
+      http {
+          resolver 127.0.0.11 valid=2s;
+          server {
+              listen 80;
+              location / {
+                  set \$$frontend_upstream http://frontend:80;
+                  proxy_pass \$$frontend_upstream;
+              }
+              location /api/menu {
+                  set \$$menu_upstream http://menu-service:8080;
+                  proxy_pass \$$menu_upstream;
+              }
+              location /api/orders {
+                  set \$$orders_upstream http://order-service:8081;
+                  proxy_pass \$$orders_upstream;
+              }
+          }
+      }
+      EOF
+      nginx -g 'daemon off;'"
