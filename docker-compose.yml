@@ -1,0 +1,117 @@
+version: '3.8'
+
+networks:
+  nginx-frontend:
+    driver: bridge
+  nginx-backend:
+    driver: bridge
+  backend-redis:
+    internal: true
+
+secrets:
+  redis_password:
+    file: ./secrets/redis_password.txt
+
+volumes:
+  redis_data:
+
+x-backend-deploy: &backend-deploy
+  deploy:
+    replicas: 2
+    update_config:
+      order: start-first
+    restart_policy:
+      condition: on-failure
+
+services:
+
+  redis:
+    image: redis:7-alpine
+    command: >
+      sh -c "redis-server /usr/local/etc/redis/redis.conf --requirepass \$$(cat /run/secrets/redis_password)"
+    secrets:
+      - redis_password
+    volumes:
+      - redis_data:/data
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    networks:
+      - backend-redis
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$(cat /run/secrets/redis_password)\" ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  menu-service:
+    <<: *backend-deploy
+    build:
+      context: ./menu-service
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      PORT: 8080
+      ORDER_SERVICE_URL: http://order-service:8081
+    secrets:
+      - redis_password
+    networks:
+      - backend-redis
+      - nginx-backend
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  order-service:
+    <<: *backend-deploy
+    build:
+      context: ./order-service
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      SERVER_PORT: 8081
+      MENU_SERVICE_URL: http://menu-service:8080
+    secrets:
+      - redis_password
+    networks:
+      - backend-redis
+      - nginx-backend
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8081/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  frontend:
+    build:
+      context: ./frontend
+    networks:
+      - nginx-frontend
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - nginx-frontend
+      - nginx-backend
+    depends_on:
+      frontend:
+        condition: service_healthy
+      menu-service:
+        condition: service_healthy
+      order-service:
+        condition: service_healthy
